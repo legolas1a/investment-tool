@@ -1,570 +1,437 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  Trash2, Wallet, 
-  Target, LineChart, ChevronRight, Settings, LogOut, AlertTriangle, BarChart3, 
-  Zap, Activity, PieChart, MousePointer2, Scale, History
-} from 'lucide-react';
-import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, 
-  signInAnonymously, 
-  onAuthStateChanged,
-  GoogleAuthProvider,
-  signInWithPopup,
-  signOut,
-  signInWithCustomToken
-} from 'firebase/auth';
-import { 
-  getFirestore, 
-  doc, 
-  collection, 
-  onSnapshot, 
-  setDoc, 
-  deleteDoc, 
-  query 
-} from 'firebase/firestore';
-
-// --- FIREBASE INITIALIZATION ---
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'winston-invest-v2-5';
-
-const App = () => {
-  const [user, setUser] = useState(null);
-  const [cashFlows, setCashFlows] = useState([]);
-  const [settings, setSettings] = useState({
-    nav: 0,
-    benchmark: 6.0,
-    vnIndexStart: 1100,
-    vnIndexCurrent: 1250
-  });
-  const [loading, setLoading] = useState(true);
-  const [isProcessing, setIsProcessing] = useState(false);
-
-  // --- AUTHENTICATION ---
-  useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (err) { 
-        console.error("Auth failed:", err); 
-        setLoading(false); 
-      }
-    };
-    initAuth();
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Investment Analytics V2.5</title>
     
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      if (u) setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // --- DATA SYNC ---
-  useEffect(() => {
-    if (!user) return;
+    <!-- Tailwind CSS (CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
     
-    // Flows Sync
-    const q = query(collection(db, 'artifacts', appId, 'users', user.uid, 'flows'));
-    const unsubFlows = onSnapshot(q, (snap) => {
-      const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      setCashFlows(data.sort((a, b) => new Date(a.date) - new Date(b.date)));
-    }, (err) => console.error("Flows sync error:", err));
+    <!-- React & ReactDOM (ESM format for browser) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <style>
+        /* Tối ưu hóa hiển thị khi Tailwind chưa tải xong */
+        body { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+        input[type="number"]::-webkit-inner-spin-button, 
+        input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+        input[type="number"] { -moz-appearance: textfield; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+    
+    <!-- React App Mount Point -->
+    <div id="root"></div>
 
-    // Settings Sync
-    const configDoc = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'main');
-    const unsubConfig = onSnapshot(configDoc, (docSnap) => {
-      if (docSnap.exists()) {
-        setSettings(prev => ({ ...prev, ...docSnap.data() }));
-      }
-    }, (err) => console.error("Settings sync error:", err));
-
-    return () => { unsubFlows(); unsubConfig(); };
-  }, [user]);
-
-  // --- CALCULATIONS ---
-  const xirr = useMemo(() => {
-    const flows = [
-      ...cashFlows.map(f => ({ date: new Date(f.date), amount: -parseFloat(f.amount || 0) })),
-      { date: new Date(), amount: parseFloat(settings.nav || 0) }
-    ];
-    if (flows.length < 2 || cashFlows.length === 0) return 0;
-
-    const calc = (rate) => flows.reduce((acc, f) => {
-      const t = (f.date - flows[0].date) / (365 * 24 * 60 * 60 * 1000);
-      return acc + f.amount / Math.pow(1 + rate, t);
-    }, 0);
-
-    const deriv = (rate) => flows.reduce((acc, f) => {
-      const t = (f.date - flows[0].date) / (365 * 24 * 60 * 60 * 1000);
-      return acc - t * f.amount / Math.pow(1 + rate, t + 1);
-    }, 0);
-
-    let rate = 0.1;
-    for (let i = 0; i < 30; i++) {
-      const f = calc(rate); const df = deriv(rate);
-      if (Math.abs(f) < 1e-7) break;
-      rate = rate - f / df;
-    }
-    return isNaN(rate) || !isFinite(rate) ? 0 : rate * 100;
-  }, [cashFlows, settings.nav]);
-
-  const vnIndexGrowth = useMemo(() => {
-    if (!settings.vnIndexStart || !settings.vnIndexCurrent) return 0;
-    return ((settings.vnIndexCurrent - settings.vnIndexStart) / settings.vnIndexStart) * 100;
-  }, [settings.vnIndexStart, settings.vnIndexCurrent]);
-
-  // --- ACTIONS ---
-  const addFlow = async () => {
-    if (!user || isProcessing) return;
-    setIsProcessing(true);
-    try {
-      const id = crypto.randomUUID();
-      await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'flows', id), {
-        date: new Date().toISOString().split('T')[0],
-        amount: 0,
-        description: 'Giao dịch mới'
-      });
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  const updateSetting = (key, value) => {
-    setSettings(prev => ({ ...prev, [key]: value }));
-    if (user) {
-      setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'main'), { [key]: value }, { merge: true });
-    }
-  };
-
-  if (loading) return <LoadingScreen />;
-
-  return (
-    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans p-4 md:p-6 lg:p-8">
-      <div className="max-w-7xl mx-auto space-y-8">
+    <!-- 
+      Sử dụng type="text/babel" và data-type="module" để trình duyệt tự dịch 
+      React JSX và import các thư viện từ CDN mạng (esm.sh).
+    -->
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useMemo } from 'https://esm.sh/react@18.2.0';
+        import { createRoot } from 'https://esm.sh/react-dom@18.2.0/client';
         
-        <Header user={user} />
+        // Import Icons từ esm.sh
+        import { 
+          Trash2, Wallet, Target, LineChart, ChevronRight, Settings, LogOut, 
+          AlertTriangle, BarChart3, Zap, Activity, PieChart, MousePointer2, Scale, History
+        } from 'https://esm.sh/lucide-react@0.292.0';
+        
+        // Import Firebase từ gstatic CDN (Official Google CDN) để tránh lỗi Component Registry
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js';
+        import { 
+          getAuth, signInAnonymously, onAuthStateChanged, GoogleAuthProvider, 
+          signInWithPopup, signOut, signInWithCustomToken 
+        } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js';
+        import { 
+          getFirestore, doc, collection, onSnapshot, setDoc, deleteDoc, query 
+        } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js';
 
-        {/* Hero Metrics */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-          <MetricCard title="Tỷ suất XIRR" value={`${xirr.toFixed(2)}%`} sub="Lãi suất thực năm" highlight icon={<Zap size={18}/>} />
-          <MetricCard title="Thị trường (VNI)" value={`${vnIndexGrowth.toFixed(1)}%`} sub="VNI Benchmark" icon={<LineChart size={18}/>} />
-          <MetricCard title="Market Alpha" value={`${(xirr - vnIndexGrowth).toFixed(2)}%`} sub="Vs VN-Index" variant={xirr >= vnIndexGrowth ? 'success' : 'danger'} icon={<Activity size={18}/>} />
-          <MetricCard title="Savings Alpha" value={`${(xirr - settings.benchmark).toFixed(2)}%`} sub={`Vs Savings ${settings.benchmark}%`} variant={xirr >= settings.benchmark ? 'success' : 'danger'} icon={<Wallet size={18}/>} />
-        </div>
+        // --- FIREBASE INITIALIZATION ---
+        // ĐIỀN CONFIG FIREBASE CỦA MÀY VÀO ĐÂY ĐỂ CHẠY TRÊN GITHUB PAGES
+        const myFirebaseConfig = {
+          apiKey: "",
+          authDomain: "",
+          projectId: "",
+          storageBucket: "",
+          messagingSenderId: "",
+          appId: ""
+        };
 
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          {/* Left Panel */}
-          <div className="lg:col-span-8 space-y-6">
+        const isConfigValid = myFirebaseConfig.apiKey !== "";
+        // Giữ logic fallback cho hệ thống Canvas test
+        const finalConfig = !isConfigValid && typeof window.__firebase_config !== 'undefined' 
+          ? JSON.parse(window.__firebase_config) 
+          : myFirebaseConfig;
+
+        const app = initializeApp(finalConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const globalAppId = typeof window.__app_id !== 'undefined' ? window.__app_id : 'winston-invest-v2-5';
+
+        // ==========================================
+        // TOÀN BỘ CODE REACT CỦA MÀY ĐƯỢC GIỮ NGUYÊN
+        // ==========================================
+
+        const App = () => {
+          const [user, setUser] = useState(null);
+          const [cashFlows, setCashFlows] = useState([]);
+          const [settings, setSettings] = useState({
+            nav: 0,
+            benchmark: 6.0,
+            vnIndexStart: 1100,
+            vnIndexCurrent: 1250
+          });
+          const [loading, setLoading] = useState(true);
+          const [isProcessing, setIsProcessing] = useState(false);
+
+          // --- AUTHENTICATION ---
+          useEffect(() => {
+            const initAuth = async () => {
+              try {
+                if (typeof window.__initial_auth_token !== 'undefined' && window.__initial_auth_token) {
+                  await signInWithCustomToken(auth, window.__initial_auth_token);
+                } else {
+                  await signInAnonymously(auth);
+                }
+              } catch (err) { 
+                console.error("Auth failed:", err); 
+                setLoading(false); 
+              }
+            };
+            initAuth();
             
-            <CashFlowTable 
-              cashFlows={cashFlows} 
-              onAdd={addFlow} 
-              user={user} 
-              appId={appId}
-              db={db}
-            />
+            const unsubscribe = onAuthStateChanged(auth, (u) => {
+              setUser(u);
+              if (u) setLoading(false);
+            });
+            return () => unsubscribe();
+          }, []);
 
-            <NavInputCard 
-              navValue={settings.nav} 
-              onChange={(v) => updateSetting('nav', v)} 
-            />
-
-          </div>
-
-          {/* Right Panel */}
-          <div className="lg:col-span-4 space-y-6">
+          // --- DATA SYNC ---
+          useEffect(() => {
+            if (!user) return;
             
-            <MarketContextCard 
-              settings={settings}
-              updateSetting={updateSetting}
-              vnIndexGrowth={vnIndexGrowth}
-              xirr={xirr}
-            />
+            const q = query(collection(db, 'artifacts', globalAppId, 'users', user.uid, 'flows'));
+            const unsubFlows = onSnapshot(q, (snap) => {
+              const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+              setCashFlows(data.sort((a, b) => new Date(a.date) - new Date(b.date)));
+            }, (err) => console.error("Flows sync error:", err));
 
-            <SavingsSliderCard 
-              benchmark={settings.benchmark}
-              onChange={(v) => updateSetting('benchmark', v)}
-            />
+            const configDoc = doc(db, 'artifacts', globalAppId, 'users', user.uid, 'settings', 'main');
+            const unsubConfig = onSnapshot(configDoc, (docSnap) => {
+              if (docSnap.exists()) {
+                setSettings(prev => ({ ...prev, ...docSnap.data() }));
+              }
+            }, (err) => console.error("Settings sync error:", err));
 
-            <ComparisonCard 
-              xirr={xirr} 
-              benchmark={settings.benchmark} 
-              navValue={settings.nav} 
-            />
+            return () => { unsubFlows(); unsubConfig(); };
+          }, [user]);
 
-            <ProjectionCard 
-              xirr={xirr} 
-              navValue={settings.nav} 
-            />
+          // --- CALCULATIONS ---
+          const xirr = useMemo(() => {
+            const flows = [
+              ...cashFlows.map(f => ({ date: new Date(f.date), amount: -parseFloat(f.amount || 0) })),
+              { date: new Date(), amount: parseFloat(settings.nav || 0) }
+            ];
+            if (flows.length < 2 || cashFlows.length === 0) return 0;
 
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
+            const calc = (rate) => flows.reduce((acc, f) => {
+              const t = (f.date - flows[0].date) / (365 * 24 * 60 * 60 * 1000);
+              return acc + f.amount / Math.pow(1 + rate, t);
+            }, 0);
 
-// --- SUB-COMPONENTS ---
+            const deriv = (rate) => flows.reduce((acc, f) => {
+              const t = (f.date - flows[0].date) / (365 * 24 * 60 * 60 * 1000);
+              return acc - t * f.amount / Math.pow(1 + rate, t + 1);
+            }, 0);
 
-const Header = ({ user }) => (
-  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-6">
-    <div className="flex items-center gap-4">
-      <div className="w-12 h-12 bg-slate-900 rounded-2xl flex items-center justify-center shadow-xl shadow-slate-200">
-        <Activity className="text-white" size={24} />
-      </div>
-      <div>
-        <h1 className="text-2xl font-black tracking-tighter uppercase">Investment <span className="text-indigo-600">Analytics</span></h1>
-        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Growth Engine V2.5 • Winston</p>
-      </div>
-    </div>
+            let rate = 0.1;
+            for (let i = 0; i < 30; i++) {
+              const f = calc(rate); const df = deriv(rate);
+              if (Math.abs(f) < 1e-7) break;
+              rate = rate - f / df;
+            }
+            return isNaN(rate) || !isFinite(rate) ? 0 : rate * 100;
+          }, [cashFlows, settings.nav]);
 
-    <div className="flex items-center gap-3 self-end sm:self-auto">
-      {user?.isAnonymous ? (
-        <button onClick={() => signInWithPopup(auth, new GoogleAuthProvider())} className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-wider shadow-sm hover:bg-slate-50 transition-all flex items-center gap-2">
-          <Settings size={14} className="text-indigo-600" /> Cloud Backup
-        </button>
-      ) : (
-        <div className="flex items-center gap-3 bg-white pl-1.5 pr-4 py-1.5 rounded-2xl shadow-sm border border-slate-100">
-          <img 
-            src={user?.photoURL || `https://ui-avatars.com/api/?name=${user?.displayName || 'Winston'}&background=e0e7ff&color=4f46e5`} 
-            className="w-7 h-7 rounded-xl object-cover bg-indigo-50" 
-            alt="Avatar" 
-            onError={(e) => {
-              e.target.onerror = null; 
-              e.target.src = `https://ui-avatars.com/api/?name=${user?.displayName || 'W'}&background=e0e7ff&color=4f46e5`;
-            }}
-          />
-          <span className="text-[10px] font-black uppercase text-slate-600 max-w-[100px] truncate">
-            {user?.displayName || 'Investor'}
-          </span>
-          <button onClick={() => signOut(auth)} className="text-slate-300 hover:text-red-500 transition-colors" title="Đăng xuất">
-            <LogOut size={16} />
-          </button>
-        </div>
-      )}
-    </div>
-  </div>
-);
+          const vnIndexGrowth = useMemo(() => {
+            if (!settings.vnIndexStart || !settings.vnIndexCurrent) return 0;
+            return ((settings.vnIndexCurrent - settings.vnIndexStart) / settings.vnIndexStart) * 100;
+          }, [settings.vnIndexStart, settings.vnIndexCurrent]);
 
-const CashFlowTable = ({ cashFlows, onAdd, user, appId, db }) => (
-  <div className="bg-white rounded-[2.5rem] border border-slate-200 shadow-xl shadow-slate-100/50 overflow-hidden transition-all hover:shadow-slate-200/50">
-    <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/30">
-      <div className="flex items-center gap-3">
-        <div className="w-8 h-8 bg-indigo-50 rounded-lg flex items-center justify-center text-indigo-600">
-          <History size={18} />
-        </div>
-        <h3 className="text-xs font-black uppercase tracking-widest text-slate-700">Lịch sử nạp rút vốn</h3>
-      </div>
-      <button onClick={onAdd} className="px-4 py-2 bg-indigo-600 text-white text-[10px] font-black rounded-xl uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100">
-        + Thêm dòng tiền
-      </button>
-    </div>
-    <div className="overflow-x-auto max-h-[450px]">
-      <table className="w-full text-left text-sm">
-        <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-400 sticky top-0 z-10 border-b border-slate-100">
-          <tr>
-            <th className="px-6 py-4">Ngày</th>
-            <th className="px-6 py-4">Nội dung</th>
-            <th className="px-6 py-4 text-right">Số tiền</th>
-            <th className="px-6 py-4 text-right"></th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-50">
-          {cashFlows.length === 0 && (
-            <tr>
-              <td colSpan="4" className="py-24 text-center">
-                <div className="flex flex-col items-center gap-3 opacity-20">
-                  <PieChart size={48} />
-                  <p className="text-[10px] font-black uppercase tracking-widest italic">Hãy bắt đầu bằng khoản nạp vốn đầu tiên</p>
+          // --- ACTIONS ---
+          const addFlow = async () => {
+            if (!user || isProcessing) return;
+            setIsProcessing(true);
+            try {
+              const id = crypto.randomUUID();
+              await setDoc(doc(db, 'artifacts', globalAppId, 'users', user.uid, 'flows', id), {
+                date: new Date().toISOString().split('T')[0],
+                amount: 0,
+                description: 'Giao dịch mới'
+              });
+            } finally {
+              setIsProcessing(false);
+            }
+          };
+
+          const updateSetting = (key, value) => {
+            setSettings(prev => ({ ...prev, [key]: value }));
+            if (user) {
+              setDoc(doc(db, 'artifacts', globalAppId, 'users', user.uid, 'settings', 'main'), { [key]: value }, { merge: true });
+            }
+          };
+
+          if (loading) return <LoadingScreen />;
+
+          return (
+            <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans p-4 md:p-6 lg:p-8">
+              <div className="max-w-7xl mx-auto space-y-8">
+                <Header user={user} isConfigValid={isConfigValid} />
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+                  <MetricCard title="Tỷ suất XIRR" value={`${xirr.toFixed(2)}%`} sub="Lãi suất thực năm" highlight icon={<Zap size={18}/>} />
+                  <MetricCard title="Thị trường (VNI)" value={`${vnIndexGrowth.toFixed(1)}%`} sub="VNI Benchmark" icon={<LineChart size={18}/>} />
+                  <MetricCard title="Market Alpha" value={`${(xirr - vnIndexGrowth).toFixed(2)}%`} sub="Vs VN-Index" variant={xirr >= vnIndexGrowth ? 'success' : 'danger'} icon={<Activity size={18}/>} />
+                  <MetricCard title="Savings Alpha" value={`${(xirr - settings.benchmark).toFixed(2)}%`} sub={`Vs Savings ${settings.benchmark}%`} variant={xirr >= settings.benchmark ? 'success' : 'danger'} icon={<Wallet size={18}/>} />
                 </div>
-              </td>
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                  <div className="lg:col-span-8 space-y-6">
+                    <CashFlowTable cashFlows={cashFlows} onAdd={addFlow} user={user} appId={globalAppId} db={db} />
+                    <NavInputCard navValue={settings.nav} onChange={(v) => updateSetting('nav', v)} />
+                  </div>
+                  <div className="lg:col-span-4 space-y-6">
+                    <MarketContextCard settings={settings} updateSetting={updateSetting} vnIndexGrowth={vnIndexGrowth} xirr={xirr} />
+                    <SavingsSliderCard benchmark={settings.benchmark} onChange={(v) => updateSetting('benchmark', v)} />
+                    <ComparisonCard xirr={xirr} benchmark={settings.benchmark} navValue={settings.nav} />
+                    <ProjectionCard xirr={xirr} navValue={settings.nav} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        };
+
+        // --- SUB-COMPONENTS ---
+        const Header = ({ user, isConfigValid }) => (
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-6">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 bg-slate-900 rounded-2xl flex items-center justify-center shadow-xl shadow-slate-200">
+                <Activity className="text-white" size={24} />
+              </div>
+              <div>
+                <h1 className="text-2xl font-black tracking-tighter uppercase">Investment <span className="text-indigo-600">Analytics</span></h1>
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Growth Engine V2.5 • Winston</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 self-end sm:self-auto">
+              {!isConfigValid && (
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-50 text-amber-600 rounded-xl border border-amber-100 text-[9px] font-black uppercase tracking-tighter">
+                  <AlertTriangle size={12} /> Local Session
+                </div>
+              )}
+              {user?.isAnonymous ? (
+                <button onClick={() => signInWithPopup(auth, new GoogleAuthProvider())} className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-wider shadow-sm hover:bg-slate-50 transition-all flex items-center gap-2">
+                  <Settings size={14} className="text-indigo-600" /> Cloud Backup
+                </button>
+              ) : (
+                <div className="flex items-center gap-3 bg-white pl-1.5 pr-4 py-1.5 rounded-2xl shadow-sm border border-slate-100">
+                  <img 
+                    src={user?.photoURL || `https://ui-avatars.com/api/?name=${user?.displayName || 'Winston'}&background=e0e7ff&color=4f46e5`} 
+                    className="w-7 h-7 rounded-xl object-cover bg-indigo-50" 
+                    alt="Avatar" 
+                    onError={(e) => { e.target.onerror = null; e.target.src = `https://ui-avatars.com/api/?name=${user?.displayName || 'W'}&background=e0e7ff&color=4f46e5`; }}
+                  />
+                  <span className="text-[10px] font-black uppercase text-slate-600 max-w-[100px] truncate">{user?.displayName || 'Investor'}</span>
+                  <button onClick={() => signOut(auth)} className="text-slate-300 hover:text-red-500 transition-colors" title="Đăng xuất"><LogOut size={16} /></button>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+
+        const CashFlowTable = ({ cashFlows, onAdd, user, appId, db }) => (
+          <div className="bg-white rounded-[2.5rem] border border-slate-200 shadow-xl shadow-slate-100/50 overflow-hidden transition-all hover:shadow-slate-200/50">
+            <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/30">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 bg-indigo-50 rounded-lg flex items-center justify-center text-indigo-600"><History size={18} /></div>
+                <h3 className="text-xs font-black uppercase tracking-widest text-slate-700">Lịch sử nạp rút vốn</h3>
+              </div>
+              <button onClick={onAdd} className="px-4 py-2 bg-indigo-600 text-white text-[10px] font-black rounded-xl uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100">+ Thêm dòng tiền</button>
+            </div>
+            <div className="overflow-x-auto max-h-[450px]">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-400 sticky top-0 z-10 border-b border-slate-100">
+                  <tr><th className="px-6 py-4">Ngày</th><th className="px-6 py-4">Nội dung</th><th className="px-6 py-4 text-right">Số tiền</th><th className="px-6 py-4 text-right"></th></tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  {cashFlows.length === 0 && (
+                    <tr>
+                      <td colSpan="4" className="py-24 text-center">
+                        <div className="flex flex-col items-center gap-3 opacity-20"><PieChart size={48} /><p className="text-[10px] font-black uppercase tracking-widest italic">Hãy bắt đầu bằng khoản nạp vốn đầu tiên</p></div>
+                      </td>
+                    </tr>
+                  )}
+                  {cashFlows.map(f => <CashFlowRow key={f.id} flow={f} user={user} appId={appId} db={db} />)}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+
+        const CashFlowRow = ({ flow, user, appId, db }) => {
+          const [localFlow, setLocalFlow] = useState(flow);
+          useEffect(() => { setLocalFlow(flow); }, [flow]);
+          const handleChange = (field, value) => { setLocalFlow(prev => ({ ...prev, [field]: value })); };
+          const handleBlur = (field) => {
+            if (localFlow[field] !== flow[field]) {
+              let finalValue = localFlow[field];
+              if (field === 'amount') finalValue = parseFloat(finalValue) || 0;
+              setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'flows', flow.id), { [field]: finalValue }, { merge: true });
+            }
+          };
+          return (
+            <tr className="group hover:bg-slate-50/80 transition-colors">
+              <td className="px-6 py-4"><input type="date" value={localFlow.date} onChange={e => handleChange('date', e.target.value)} onBlur={() => handleBlur('date')} className="bg-transparent border-none text-xs font-bold p-0 focus:ring-0 w-full" /></td>
+              <td className="px-6 py-4"><input type="text" value={localFlow.description} onChange={e => handleChange('description', e.target.value)} onBlur={() => handleBlur('description')} className="bg-transparent border-none text-xs w-full p-0 focus:ring-0 text-slate-500 font-medium" /></td>
+              <td className="px-6 py-4 text-right"><input type="number" value={localFlow.amount} onChange={e => handleChange('amount', e.target.value)} onBlur={() => handleBlur('amount')} className={`bg-transparent border-none font-mono font-black text-right p-0 focus:ring-0 w-full text-base ${localFlow.amount >= 0 ? 'text-indigo-600' : 'text-rose-500'}`} /></td>
+              <td className="px-6 py-4 text-right"><button onClick={() => deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'flows', flow.id))} className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500 transition-all"><Trash2 size={16} /></button></td>
             </tr>
-          )}
-          {cashFlows.map(f => (
-            <CashFlowRow key={f.id} flow={f} user={user} appId={appId} db={db} />
-          ))}
-        </tbody>
-      </table>
-    </div>
-  </div>
-);
+          );
+        };
 
-// Optimized Row Component to prevent excessive Firestore writes
-const CashFlowRow = ({ flow, user, appId, db }) => {
-  const [localFlow, setLocalFlow] = useState(flow);
+        const NavInputCard = ({ navValue, onChange }) => {
+          const [localNav, setLocalNav] = useState(navValue);
+          useEffect(() => { setLocalNav(navValue); }, [navValue]);
+          const handleBlur = () => { const val = parseFloat(localNav) || 0; if (val !== navValue) onChange(val); };
+          return (
+            <div className="bg-white p-8 rounded-[2.5rem] border border-white shadow-xl shadow-slate-200/50 relative overflow-hidden group hover:shadow-slate-300/50 transition-all">
+              <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
+                <div className="space-y-1">
+                  <h3 className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 flex items-center gap-2"><Target size={18} className="text-green-500" /> Tài sản hiện có (NAV)</h3>
+                  <p className="text-[10px] text-slate-300 font-bold uppercase">Tổng số dư trong App chứng khoán (Tiền + Cổ phiếu)</p>
+                </div>
+                <div className="flex items-end gap-3 flex-1 justify-end max-w-md">
+                  <input type="number" value={localNav} onChange={e => setLocalNav(e.target.value)} onBlur={handleBlur} className="w-full text-5xl font-black text-slate-900 border-none p-0 focus:ring-0 bg-transparent text-right placeholder-slate-100" />
+                  <span className="text-xs font-black text-slate-300 uppercase italic pb-2">VNĐ</span>
+                </div>
+              </div>
+              <Target size={240} className="absolute top-[-20%] right-[-5%] opacity-[0.02] group-hover:opacity-[0.04] transition-opacity pointer-events-none" />
+            </div>
+          );
+        };
 
-  useEffect(() => {
-    setLocalFlow(flow);
-  }, [flow]);
+        const MarketContextCard = ({ settings, updateSetting, vnIndexGrowth, xirr }) => {
+          const [localStart, setLocalStart] = useState(settings.vnIndexStart);
+          const [localCurrent, setLocalCurrent] = useState(settings.vnIndexCurrent);
+          useEffect(() => { setLocalStart(settings.vnIndexStart); }, [settings.vnIndexStart]);
+          useEffect(() => { setLocalCurrent(settings.vnIndexCurrent); }, [settings.vnIndexCurrent]);
+          const handleBlurStart = () => updateSetting('vnIndexStart', parseFloat(localStart) || 0);
+          const handleBlurCurrent = () => updateSetting('vnIndexCurrent', parseFloat(localCurrent) || 0);
+          return (
+            <div className="bg-slate-900 p-8 rounded-[2.5rem] text-white shadow-2xl relative overflow-hidden">
+              <div className="relative z-10 space-y-8">
+                <div className="flex items-center gap-2"><BarChart3 className="text-indigo-400" size={16} /><h4 className="text-[10px] font-black uppercase tracking-widest text-indigo-400">Thị trường VN-Index</h4></div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1"><label className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Base Index</label><input type="number" value={localStart} onChange={e => setLocalStart(e.target.value)} onBlur={handleBlurStart} className="bg-white/5 border-none rounded-xl px-4 py-3 text-lg font-black w-full text-white focus:ring-2 focus:ring-indigo-500" /></div>
+                  <div className="space-y-1"><label className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Current Index</label><input type="number" value={localCurrent} onChange={e => setLocalCurrent(e.target.value)} onBlur={handleBlurCurrent} className="bg-white/5 border-none rounded-xl px-4 py-3 text-lg font-black w-full text-white focus:ring-2 focus:ring-indigo-500" /></div>
+                </div>
+                <div className="pt-6 border-t border-white/5 flex items-center justify-between">
+                  <div><span className="text-[9px] font-black text-slate-500 uppercase">Growth</span><div className="text-4xl font-black text-indigo-400 leading-none">{vnIndexGrowth.toFixed(1)}%</div></div>
+                  <div className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase ${xirr >= vnIndexGrowth ? 'bg-green-500/20 text-green-400 border border-green-500/20' : 'bg-rose-500/20 text-rose-400 border border-rose-500/20'}`}>{xirr >= vnIndexGrowth ? 'Outperform' : 'Underperform'}</div>
+                </div>
+              </div>
+              <Activity className="absolute right-[-20px] top-[-20px] opacity-[0.03] rotate-[-15deg]" size={150} />
+            </div>
+          );
+        };
 
-  const handleChange = (field, value) => {
-    setLocalFlow(prev => ({ ...prev, [field]: value }));
-  };
+        const SavingsSliderCard = ({ benchmark, onChange }) => {
+          const [localValue, setLocalValue] = useState(benchmark);
+          useEffect(() => { setLocalValue(benchmark); }, [benchmark]);
+          const handleChange = (e) => setLocalValue(parseFloat(e.target.value));
+          const handleCommit = () => { if (localValue !== benchmark) onChange(localValue); };
+          return (
+            <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-xl shadow-slate-100/50 hover:shadow-slate-200/50 transition-all">
+              <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-8">Savings Benchmark</h4>
+              <div className="space-y-6">
+                <div className="flex justify-between items-end"><span className="text-[11px] font-black text-slate-600 uppercase">Lãi tiết kiệm</span><span className="text-3xl font-black text-indigo-600">{localValue}%</span></div>
+                <input type="range" min="0" max="15" step="0.5" value={localValue} onChange={handleChange} onMouseUp={handleCommit} onTouchEnd={handleCommit} className="w-full h-1.5 bg-slate-100 rounded-full appearance-none cursor-pointer accent-indigo-600" />
+              </div>
+            </div>
+          );
+        };
 
-  const handleBlur = (field) => {
-    if (localFlow[field] !== flow[field]) {
-      let finalValue = localFlow[field];
-      if (field === 'amount') finalValue = parseFloat(finalValue) || 0;
-      setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'flows', flow.id), { [field]: finalValue }, { merge: true });
-    }
-  };
-
-  const handleDelete = () => {
-    deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'flows', flow.id));
-  };
-
-  return (
-    <tr className="group hover:bg-slate-50/80 transition-colors">
-      <td className="px-6 py-4">
-        <input 
-          type="date" 
-          value={localFlow.date} 
-          onChange={e => handleChange('date', e.target.value)} 
-          onBlur={() => handleBlur('date')}
-          className="bg-transparent border-none text-xs font-bold p-0 focus:ring-0 w-full" 
-        />
-      </td>
-      <td className="px-6 py-4">
-        <input 
-          type="text" 
-          value={localFlow.description} 
-          onChange={e => handleChange('description', e.target.value)} 
-          onBlur={() => handleBlur('description')}
-          className="bg-transparent border-none text-xs w-full p-0 focus:ring-0 text-slate-500 font-medium" 
-        />
-      </td>
-      <td className="px-6 py-4 text-right">
-        <input 
-          type="number" 
-          value={localFlow.amount} 
-          onChange={e => handleChange('amount', e.target.value)} 
-          onBlur={() => handleBlur('amount')}
-          className={`bg-transparent border-none font-mono font-black text-right p-0 focus:ring-0 w-full text-base ${localFlow.amount >= 0 ? 'text-indigo-600' : 'text-rose-500'}`} 
-        />
-      </td>
-      <td className="px-6 py-4 text-right">
-        <button onClick={handleDelete} className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500 transition-all">
-          <Trash2 size={16} />
-        </button>
-      </td>
-    </tr>
-  );
-};
-
-const NavInputCard = ({ navValue, onChange }) => {
-  const [localNav, setLocalNav] = useState(navValue);
-
-  useEffect(() => {
-    setLocalNav(navValue);
-  }, [navValue]);
-
-  const handleBlur = () => {
-    const val = parseFloat(localNav) || 0;
-    if (val !== navValue) onChange(val);
-  };
-
-  return (
-    <div className="bg-white p-8 rounded-[2.5rem] border border-white shadow-xl shadow-slate-200/50 relative overflow-hidden group hover:shadow-slate-300/50 transition-all">
-      <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
-        <div className="space-y-1">
-          <h3 className="text-xs font-black uppercase tracking-[0.2em] text-slate-400 flex items-center gap-2">
-            <Target size={18} className="text-green-500" /> Tài sản hiện có (NAV)
-          </h3>
-          <p className="text-[10px] text-slate-300 font-bold uppercase">Tổng số dư trong App chứng khoán (Tiền + Cổ phiếu)</p>
-        </div>
-        <div className="flex items-end gap-3 flex-1 justify-end max-w-md">
-          <input 
-            type="number" 
-            value={localNav} 
-            onChange={e => setLocalNav(e.target.value)}
-            onBlur={handleBlur}
-            className="w-full text-5xl font-black text-slate-900 border-none p-0 focus:ring-0 bg-transparent text-right placeholder-slate-100" 
-          />
-          <span className="text-xs font-black text-slate-300 uppercase italic pb-2">VNĐ</span>
-        </div>
-      </div>
-      <Target size={240} className="absolute top-[-20%] right-[-5%] opacity-[0.02] group-hover:opacity-[0.04] transition-opacity pointer-events-none" />
-    </div>
-  );
-};
-
-const MarketContextCard = ({ settings, updateSetting, vnIndexGrowth, xirr }) => {
-  const [localStart, setLocalStart] = useState(settings.vnIndexStart);
-  const [localCurrent, setLocalCurrent] = useState(settings.vnIndexCurrent);
-
-  useEffect(() => { setLocalStart(settings.vnIndexStart); }, [settings.vnIndexStart]);
-  useEffect(() => { setLocalCurrent(settings.vnIndexCurrent); }, [settings.vnIndexCurrent]);
-
-  const handleBlurStart = () => updateSetting('vnIndexStart', parseFloat(localStart) || 0);
-  const handleBlurCurrent = () => updateSetting('vnIndexCurrent', parseFloat(localCurrent) || 0);
-
-  return (
-    <div className="bg-slate-900 p-8 rounded-[2.5rem] text-white shadow-2xl relative overflow-hidden">
-      <div className="relative z-10 space-y-8">
-        <div className="flex items-center gap-2">
-          <BarChart3 className="text-indigo-400" size={16} />
-          <h4 className="text-[10px] font-black uppercase tracking-widest text-indigo-400">Thị trường VN-Index</h4>
-        </div>
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-1">
-            <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Base Index</label>
-            <input 
-              type="number" 
-              value={localStart} 
-              onChange={e => setLocalStart(e.target.value)} 
-              onBlur={handleBlurStart}
-              className="bg-white/5 border-none rounded-xl px-4 py-3 text-lg font-black w-full text-white focus:ring-2 focus:ring-indigo-500" 
-            />
+        const ComparisonCard = ({ xirr, benchmark, navValue }) => (
+          <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-xl shadow-slate-100/50 hover:shadow-slate-200/50 transition-all">
+            <div className="flex items-center gap-2 mb-6"><Scale className="text-indigo-600" size={18} /><h4 className="text-[10px] font-black uppercase tracking-widest text-slate-700">So sánh vs Tiết kiệm</h4></div>
+            <div className="space-y-4">
+              <ComparisonRow label="Chênh lệch 1 năm" currentXirr={xirr} savingRate={benchmark} nav={navValue} years={1} />
+              <ComparisonRow label="Chênh lệch 3 năm" currentXirr={xirr} savingRate={benchmark} nav={navValue} years={3} />
+              <ComparisonRow label="Chênh lệch 5 năm" currentXirr={xirr} savingRate={benchmark} nav={navValue} years={5} />
+            </div>
+            <p className="mt-6 text-[9px] text-slate-400 font-bold uppercase leading-tight italic">* Số tiền mày kiếm thêm (hoặc mất đi) nếu duy trì hiệu suất đầu tư so với gửi tiết kiệm.</p>
           </div>
-          <div className="space-y-1">
-            <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Current Index</label>
-            <input 
-              type="number" 
-              value={localCurrent} 
-              onChange={e => setLocalCurrent(e.target.value)} 
-              onBlur={handleBlurCurrent}
-              className="bg-white/5 border-none rounded-xl px-4 py-3 text-lg font-black w-full text-white focus:ring-2 focus:ring-indigo-500" 
-            />
+        );
+
+        const ProjectionCard = ({ xirr, navValue }) => (
+          <div className="bg-indigo-600 p-8 rounded-[2.5rem] text-white shadow-xl shadow-indigo-200 relative overflow-hidden group">
+            <h4 className="text-[10px] font-black uppercase tracking-widest text-indigo-200 mb-8 flex items-center gap-2 relative z-10"><ChevronRight size={16} /> Lãi kép dự kiến</h4>
+            <div className="space-y-4 relative z-10">
+              <ProjectionItem label="Sau 3 năm" value={navValue * Math.pow(1 + xirr/100, 3)} />
+              <ProjectionItem label="Sau 5 năm" value={navValue * Math.pow(1 + xirr/100, 5)} />
+              <ProjectionItem label="Sau 10 năm" value={navValue * Math.pow(1 + xirr/100, 10)} bold />
+            </div>
+            <MousePointer2 className="absolute right-[-10px] bottom-[-10px] opacity-10 group-hover:scale-110 transition-transform pointer-events-none" size={100} />
           </div>
-        </div>
-        <div className="pt-6 border-t border-white/5 flex items-center justify-between">
-          <div>
-            <span className="text-[9px] font-black text-slate-500 uppercase">Growth</span>
-            <div className="text-4xl font-black text-indigo-400 leading-none">{vnIndexGrowth.toFixed(1)}%</div>
+        );
+
+        const ComparisonRow = ({ label, currentXirr, savingRate, nav, years }) => {
+          const investVal = nav * Math.pow(1 + currentXirr/100, years);
+          const savingVal = nav * Math.pow(1 + savingRate/100, years);
+          const diff = investVal - savingVal;
+          return (
+            <div className="flex justify-between items-center py-2 border-b border-slate-50 last:border-0">
+              <span className="text-[9px] font-bold text-slate-400 uppercase">{label}</span>
+              <span className={`font-mono text-sm font-black ${diff >= 0 ? 'text-green-600' : 'text-rose-500'}`}>{diff >= 0 ? '+' : ''}{Math.round(diff).toLocaleString()}đ</span>
+            </div>
+          );
+        };
+
+        const MetricCard = ({ title, value, sub, variant = 'default', highlight = false, icon }) => {
+          const getTheme = () => { if (variant === 'success') return 'text-green-600'; if (variant === 'danger') return 'text-rose-600'; if (highlight) return 'text-indigo-600'; return 'text-slate-900'; };
+          return (
+            <div className="bg-white p-6 rounded-[2rem] shadow-xl shadow-slate-100/50 border border-white hover:-translate-y-1 transition-all duration-300">
+              <div className="flex justify-between items-start mb-4"><span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">{title}</span><div className="p-2 bg-slate-50 rounded-xl text-slate-400">{icon}</div></div>
+              <div className={`text-2xl font-black ${getTheme()}`}>{value}</div>
+              <div className="text-[9px] font-bold text-slate-300 uppercase tracking-tighter mt-1">{sub}</div>
+            </div>
+          );
+        };
+
+        const ProjectionItem = ({ label, value, bold }) => (
+          <div className="flex justify-between items-center py-2 border-b border-indigo-500/30 last:border-0">
+            <span className="text-[10px] font-bold text-indigo-100 uppercase tracking-tighter">{label}</span>
+            <span className={`font-mono text-white ${bold ? 'font-black text-xl text-indigo-200' : 'font-bold text-base'}`}>{Math.round(value).toLocaleString()}đ</span>
           </div>
-          <div className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase ${xirr >= vnIndexGrowth ? 'bg-green-500/20 text-green-400 border border-green-500/20' : 'bg-rose-500/20 text-rose-400 border border-rose-500/20'}`}>
-            {xirr >= vnIndexGrowth ? 'Outperform' : 'Underperform'}
+        );
+
+        const LoadingScreen = () => (
+          <div className="h-screen flex items-center justify-center bg-slate-50">
+            <div className="flex flex-col items-center gap-4">
+              <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+              <span className="text-xs font-black uppercase tracking-[0.3em] text-slate-400 font-sans">Winston Invest OS</span>
+            </div>
           </div>
-        </div>
-      </div>
-      <Activity className="absolute right-[-20px] top-[-20px] opacity-[0.03] rotate-[-15deg]" size={150} />
-    </div>
-  );
-};
+        );
 
-const SavingsSliderCard = ({ benchmark, onChange }) => {
-  const [localValue, setLocalValue] = useState(benchmark);
-
-  useEffect(() => { setLocalValue(benchmark); }, [benchmark]);
-
-  const handleChange = (e) => setLocalValue(parseFloat(e.target.value));
-  const handleCommit = () => {
-    if (localValue !== benchmark) onChange(localValue);
-  };
-
-  return (
-    <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-xl shadow-slate-100/50 hover:shadow-slate-200/50 transition-all">
-      <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-8">Savings Benchmark</h4>
-      <div className="space-y-6">
-        <div className="flex justify-between items-end">
-          <span className="text-[11px] font-black text-slate-600 uppercase">Lãi tiết kiệm</span>
-          <span className="text-3xl font-black text-indigo-600">{localValue}%</span>
-        </div>
-        <input 
-          type="range" min="0" max="15" step="0.5" 
-          value={localValue} 
-          onChange={handleChange}
-          onMouseUp={handleCommit}
-          onTouchEnd={handleCommit}
-          className="w-full h-1.5 bg-slate-100 rounded-full appearance-none cursor-pointer accent-indigo-600" 
-        />
-      </div>
-    </div>
-  );
-};
-
-const ComparisonCard = ({ xirr, benchmark, navValue }) => (
-  <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-xl shadow-slate-100/50 hover:shadow-slate-200/50 transition-all">
-    <div className="flex items-center gap-2 mb-6">
-      <Scale className="text-indigo-600" size={18} />
-      <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-700">So sánh vs Tiết kiệm</h4>
-    </div>
-    <div className="space-y-4">
-      <ComparisonRow label="Chênh lệch 1 năm" currentXirr={xirr} savingRate={benchmark} nav={navValue} years={1} />
-      <ComparisonRow label="Chênh lệch 3 năm" currentXirr={xirr} savingRate={benchmark} nav={navValue} years={3} />
-      <ComparisonRow label="Chênh lệch 5 năm" currentXirr={xirr} savingRate={benchmark} nav={navValue} years={5} />
-    </div>
-    <p className="mt-6 text-[9px] text-slate-400 font-bold uppercase leading-tight italic">
-      * Số tiền mày kiếm thêm (hoặc mất đi) nếu duy trì hiệu suất đầu tư so với gửi tiết kiệm.
-    </p>
-  </div>
-);
-
-const ProjectionCard = ({ xirr, navValue }) => (
-  <div className="bg-indigo-600 p-8 rounded-[2.5rem] text-white shadow-xl shadow-indigo-200 relative overflow-hidden group">
-    <h4 className="text-[10px] font-black uppercase tracking-widest text-indigo-200 mb-8 flex items-center gap-2 relative z-10">
-      <ChevronRight size={16} /> Lãi kép dự kiến
-    </h4>
-    <div className="space-y-4 relative z-10">
-      <ProjectionItem label="Sau 3 năm" value={navValue * Math.pow(1 + xirr/100, 3)} />
-      <ProjectionItem label="Sau 5 năm" value={navValue * Math.pow(1 + xirr/100, 5)} />
-      <ProjectionItem label="Sau 10 năm" value={navValue * Math.pow(1 + xirr/100, 10)} bold />
-    </div>
-    <MousePointer2 className="absolute right-[-10px] bottom-[-10px] opacity-10 group-hover:scale-110 transition-transform pointer-events-none" size={100} />
-  </div>
-);
-
-// --- ATOMS ---
-
-const ComparisonRow = ({ label, currentXirr, savingRate, nav, years }) => {
-  const investVal = nav * Math.pow(1 + currentXirr/100, years);
-  const savingVal = nav * Math.pow(1 + savingRate/100, years);
-  const diff = investVal - savingVal;
-  
-  return (
-    <div className="flex justify-between items-center py-2 border-b border-slate-50 last:border-0">
-      <span className="text-[9px] font-bold text-slate-400 uppercase">{label}</span>
-      <span className={`font-mono text-sm font-black ${diff >= 0 ? 'text-green-600' : 'text-rose-500'}`}>
-        {diff >= 0 ? '+' : ''}{Math.round(diff).toLocaleString()}đ
-      </span>
-    </div>
-  );
-};
-
-const MetricCard = ({ title, value, sub, variant = 'default', highlight = false, icon }) => {
-  const getTheme = () => {
-    if (variant === 'success') return 'text-green-600';
-    if (variant === 'danger') return 'text-rose-600';
-    if (highlight) return 'text-indigo-600';
-    return 'text-slate-900';
-  };
-  return (
-    <div className="bg-white p-6 rounded-[2rem] shadow-xl shadow-slate-100/50 border border-white hover:-translate-y-1 transition-all duration-300">
-      <div className="flex justify-between items-start mb-4">
-        <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">{title}</span>
-        <div className="p-2 bg-slate-50 rounded-xl text-slate-400">{icon}</div>
-      </div>
-      <div className={`text-2xl font-black ${getTheme()}`}>
-        {value}
-      </div>
-      <div className="text-[9px] font-bold text-slate-300 uppercase tracking-tighter mt-1">{sub}</div>
-    </div>
-  );
-};
-
-const ProjectionItem = ({ label, value, bold }) => (
-  <div className="flex justify-between items-center py-2 border-b border-indigo-500/30 last:border-0">
-    <span className="text-[10px] font-bold text-indigo-100 uppercase tracking-tighter">{label}</span>
-    <span className={`font-mono text-white ${bold ? 'font-black text-xl text-indigo-200' : 'font-bold text-base'}`}>
-      {Math.round(value).toLocaleString()}đ
-    </span>
-  </div>
-);
-
-const LoadingScreen = () => (
-  <div className="h-screen flex items-center justify-center bg-slate-50">
-    <div className="flex flex-col items-center gap-4">
-      <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
-      <span className="text-xs font-black uppercase tracking-[0.3em] text-slate-400 font-sans">Winston Invest OS</span>
-    </div>
-  </div>
-);
-
-export default App;
+        // Khởi chạy App
+        const rootElement = document.getElementById('root');
+        if (rootElement) {
+            const root = createRoot(rootElement);
+            root.render(<App />);
+        }
+    </script>
+</body>
+</html>
